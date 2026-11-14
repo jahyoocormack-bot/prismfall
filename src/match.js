@@ -39,7 +39,7 @@ export class Match {
     this.total = this.cfg.bots + 1;
     this.zone = { x: 0, z: 0, r: 240, fx: 0, fz: 0, fr: 240, tx: 0, tz: 0, tr: 240, phase: -1, t: 0, shrinking: false, dmg: 1, tick: 1, done: false };
     this.respawnT = 0;
-    this.botDmg = 0.55; // bot-vs-bot damage multiplier (governed in Royale to pace the match)
+    this.botDmg = mode === 'deathmatch' ? 0.72 : 0.55; // bot-vs-bot damage multiplier (governed in Royale to pace the match)
     this.paceT = 0;
   }
 

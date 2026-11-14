@@ -3,6 +3,7 @@ import { WORLD } from './config.js';
 import { rng, makeNoise, clamp, lerp, smooth } from './utils.js';
 import { Physics } from './physics.js';
 import { mergeGeoms, M } from './models.js';
+import { buildDistricts, buildAtmosphere, updateAtmosphere } from './worldplus.js';
 
 export const POIS = [
   { name: 'NEON PLAZA', x: 0, z: 0, r: 54, h: 2.0, paved: 1 },
@@ -14,7 +15,30 @@ export const POIS = [
   { name: 'SOUTH WATCH', x: -8, z: 134, r: 15, h: 3, paved: 0 },
   { name: 'WEST WATCH', x: -144, z: -6, r: 14, h: 4, paved: 0 },
   { name: 'EAST WATCH', x: 146, z: -18, r: 14, h: 3, paved: 0 },
+  { name: 'SCRAPYARD', x: 48, z: 88, r: 21, h: 2.2, paved: 1 },
+  { name: 'THE RUINS', x: -92, z: -38, r: 21, h: 6, paved: 0, dirt: 1 },
+  { name: 'BROKEN HIGHWAY', x: 40, z: -92, r: 28, h: 3, paved: 1 },
+  { name: 'BUNKER LINE', x: -44, z: 90, r: 19, h: 2.6, paved: 0, dirt: 1 },
+  { name: 'RELAY STATION', x: 90, z: -44, r: 17, h: 7, paved: 0, dirt: 1 },
+  { name: 'CHECKPOINT', x: 84, z: 6, r: 13, h: 2.2, paved: 1 },
 ];
+
+// Toxic crater lake.
+export const SINK = { x: -36, z: -80, r: 14 };
+
+// Road network: spokes out of the plaza plus an outer ring. Each road runs between two POI centres and
+// holds each end's height until it leaves that POI, so the flattened districts stay flat.
+const byName = Object.fromEntries(POIS.map((p) => [p.name, p]));
+export const ROADS = [
+  ['NEON PLAZA', 'DOCKYARD'], ['NEON PLAZA', 'THE REACTOR'], ['NEON PLAZA', 'CRYSTAL RIDGE'], ['NEON PLAZA', 'SUNSET VILLA'],
+  ['NEON PLAZA', 'NORTH WATCH'], ['NEON PLAZA', 'SOUTH WATCH'], ['NEON PLAZA', 'WEST WATCH'], ['NEON PLAZA', 'CHECKPOINT'],
+  ['CHECKPOINT', 'EAST WATCH'], ['DOCKYARD', 'SCRAPYARD'], ['SCRAPYARD', 'SOUTH WATCH'], ['THE REACTOR', 'BUNKER LINE'],
+  ['WEST WATCH', 'THE RUINS'], ['THE RUINS', 'CRYSTAL RIDGE'], ['NORTH WATCH', 'BROKEN HIGHWAY'], ['BROKEN HIGHWAY', 'SUNSET VILLA'],
+  ['SUNSET VILLA', 'RELAY STATION'], ['RELAY STATION', 'CHECKPOINT'],
+].map(([a, b]) => {
+  const A = byName[a], B = byName[b], len = Math.hypot(B.x - A.x, B.z - A.z);
+  return { ax: A.x, az: A.z, ah: A.h, bx: B.x, bz: B.z, bh: B.h, len, ra: A.r * 0.85, rb: B.r * 0.85 };
+});
 
 const WALLS = [0xf4efff, 0xffe9d6, 0xd9f7ff, 0xffd9ec];
 const ACCENTS = [0xff4f8b, 0x29d3c9, 0xffb52e, 0x7c5cff, 0x3fa9ff, 0xff7043];
@@ -33,6 +57,12 @@ export class World {
     this.lootSpots = [];
     this.jumpPads = [];
     this.spinners = [];
+    this.pulsers = [];
+    this.fires = [];
+    this.pois = POIS;
+    this.roads = ROADS;
+    this.sink = SINK;
+    this._rh = 0;
     this.storm = { x: 0, z: 0, r: 400 };
 
     this.genHeight();
@@ -45,6 +75,7 @@ export class World {
     this.buildDecor();
     this.flushBoxes();
     this.buildStorm();
+    buildAtmosphere(this);
     this.buildMinimap();
   }
 
@@ -56,15 +87,43 @@ export class World {
       for (let i = 0; i < N; i++) {
         const x = -half + i * cell, z = -half + j * cell;
         const n = noise.fbm(x * 0.011 + 5.2, z * 0.011 + 1.7, 4);
-        let h = 1.3 + Math.max(0, n - 0.4) * 36 + (noise.at(x * 0.07, z * 0.07) - 0.5) * 1.3;
+        const ridge = 1 - Math.abs(2 * noise.fbm(x * 0.016 + 31.7, z * 0.016 + 8.3, 3) - 1);
+        let h = 1.3 + Math.max(0, n - 0.4) * 44 + Math.pow(ridge, 5) * 7 * smooth(0.4, 0.56, n) + (noise.at(x * 0.07, z * 0.07) - 0.5) * 1.3;
+        // terraces: hills step up in plateaus with cliff bands between them
+        const T = 4, f = h / T, fi = Math.floor(f);
+        h = lerp(h, (fi + smooth(0.43, 0.57, f - fi)) * T, 0.9 * smooth(3.5, 7, h));
+        // crater lake
+        const dc = Math.hypot(x - SINK.x, z - SINK.z);
+        if (dc < SINK.r + 9) {
+          const bowl = smooth(SINK.r, SINK.r * 0.35, dc);
+          h = lerp(h, -1.9, bowl) + Math.exp(-Math.pow((dc - SINK.r - 1) / 3, 2)) * 4 * (1 - bowl);
+        }
         for (const p of POIS) {
           const w = 1 - smooth(p.r * 0.8, p.r * 1.3, Math.hypot(x - p.x, z - p.z));
           if (w > 0) h = lerp(h, p.h, w);
         }
+        // roads cut through hills and ride embankments across dips
+        const rd = this.roadAt(x, z);
+        if (rd < 10) h = lerp(h, this._rh, 1 - smooth(3.8, 10, rd));
         const r = Math.hypot(x, z) + (noise.at(x * 0.02 + 9, z * 0.02) - 0.5) * 22;
         h = lerp(h, -5, smooth(WORLD.islandR - 30, WORLD.islandR + 8, r));
         hm[j * N + i] = h;
       }
+  }
+
+  // Distance from (x,z) to the nearest road; this._rh receives the road surface height at that point.
+  roadAt(x, z) {
+    let best = 1e9;
+    for (const r of ROADS) {
+      const dx = r.bx - r.ax, dz = r.bz - r.az;
+      const t = clamp(((x - r.ax) * dx + (z - r.az) * dz) / (r.len * r.len), 0, 1);
+      const d = Math.hypot(x - (r.ax + dx * t), z - (r.az + dz * t));
+      if (d < best) {
+        best = d;
+        this._rh = lerp(r.ah, r.bh, clamp((t * r.len - r.ra) / Math.max(1, r.len - r.ra - r.rb), 0, 1));
+      }
+    }
+    return best;
   }
 
   height(x, z) {
@@ -79,6 +138,10 @@ export class World {
     return null;
   }
 
+  steep(x, z, k = 1.6) {
+    return Math.abs(this.height(x + 1.2, z) - this.height(x - 1.2, z)) > k || Math.abs(this.height(x, z + 1.2) - this.height(x, z - 1.2)) > k;
+  }
+
   buildTerrain() {
     const N = this.N, cell = this.cell, half = WORLD.size / 2, hm = this.hm, noise = this.noise;
     const cells = (N - 1) * (N - 1);
@@ -86,6 +149,7 @@ export class World {
     const col = {
       sand: new THREE.Color(0xffd9a8), g1: new THREE.Color(0x3fd6a4), g2: new THREE.Color(0x1fb5a8), g3: new THREE.Color(0x8ee38f),
       high: new THREE.Color(0xa78bfa), cliff: new THREE.Color(0x6d4fc2), pave: new THREE.Color(0xb3aee6), sea: new THREE.Color(0x2a9fc0),
+      road: new THREE.Color(0x4f4a8c), shoulder: new THREE.Color(0x9a94d6), dirt: new THREE.Color(0x8573bd), toxic: new THREE.Color(0x7dff8a),
     };
     const c = new THREE.Color();
     let o = 0;
@@ -98,15 +162,26 @@ export class World {
       const n = noise.at(mx * 0.045, mz * 0.045), n2 = noise.at(mx * 0.5 + 40, mz * 0.5);
       if (my < WORLD.waterY) c.copy(col.sea);
       else if (my < 0.7) c.copy(col.sand);
-      else if (ny < 0.84) c.copy(col.cliff);
       else {
         c.copy(col.g1).lerp(col.g2, smooth(0.35, 0.65, n));
         if (n2 > 0.72) c.lerp(col.g3, 0.6);
         c.lerp(col.sand, 1 - smooth(0.7, 1.5, my));
-        c.lerp(col.high, smooth(9, 13, my));
+        c.lerp(col.high, smooth(11, 17, my));
+        c.lerp(col.cliff, smooth(0.93, 0.74, ny));
       }
-      const poi = this.inPOI(mx, mz, 0.86);
-      if (poi && poi.paved && my > 0.3) c.lerp(col.pave, 0.85 * (1 - smooth(poi.r * 0.7, poi.r * 0.86, Math.hypot(mx - poi.x, mz - poi.z))));
+      const poi = this.inPOI(mx, mz, 0.9);
+      if (poi && my > 0.3) {
+        const k = 1 - smooth(poi.r * 0.7, poi.r * 0.9, Math.hypot(mx - poi.x, mz - poi.z));
+        if (poi.paved) c.lerp(col.pave, 0.85 * k);
+        else if (poi.dirt) c.lerp(col.dirt, 0.7 * k * (0.6 + n2 * 0.6));
+      }
+      if (my > 0.2 && !(poi && poi.paved)) {
+        const rd = this.roadAt(mx, mz);
+        if (rd < 3.4) c.lerp(col.road, 0.94);
+        else if (rd < 4.8) c.lerp(col.shoulder, 0.55);
+      }
+      const dsink = Math.hypot(mx - SINK.x, mz - SINK.z);
+      if (dsink < SINK.r + 2) c.lerp(col.toxic, 0.55 * smooth(SINK.r + 2, SINK.r - 4, dsink));
       c.multiplyScalar(0.9 + n2 * 0.2);
       const pts = [ax, ay, az, bx, by, bz, cx, cy, cz];
       for (let k = 0; k < 9; k += 3) {
@@ -319,6 +394,8 @@ export class World {
         this.glow(x, g, cz + 1.2, x + 0.06, g + 2.9, cz + 1.32, neon);
       }
     }
+    // warm ceiling strip so interiors glow through the doors and windows
+    this.glow(cx - Math.min(2.2, w * 0.2), top - 0.1, cz - 0.3, cx + Math.min(2.2, w * 0.2), top - 0.02, cz + 0.3, 0xffd9a0, 2.4);
     // interior cover + loot
     if (this.R() < 0.7) this.crate(x0 + 1.6, z0 + 1.6, 1.2, this.pickC(ACCENTS));
     this.lootSpots.push({ x: cx + 1.2, y: g, z: cz - 0.8 }, { x: cx - 1, y: Rf, z: cz + 1 });
@@ -523,18 +600,20 @@ export class World {
       if (i % 2) this.pad(p.x - 7, p.z - 8);
     }
 
+    buildDistricts(this);
+
     // --- supply crates sprinkled across the wilds
     let placed = 0;
-    for (let t = 0; t < 400 && placed < 38; t++) {
+    for (let t = 0; t < 500 && placed < 38; t++) {
       const a = R() * TAU, r = Math.sqrt(R()) * 160, x = Math.cos(a) * r, z = Math.sin(a) * r, h = this.height(x, z);
-      if (h < 1 || this.inPOI(x, z, 1.05)) continue;
+      if (h < 1 || this.inPOI(x, z, 1.05) || this.roadAt(x, z) < 6 || this.steep(x, z) || this.phys.blocked(x, h, z, 2.5, 3)) continue;
       const s = 1.2 + R() * 0.5;
       this.crate(x, z, s, this.pickC(ACCENTS), R() < 0.5, Math.min(h, this.height(x + s / 2, z + s / 2), this.height(x - s / 2, z - s / 2)));
       if (R() < 0.4) this.barrier(x + 2.5, z + 1.5, 3.5, R() < 0.5);
       this.lootSpots.push({ x: x + s, y: this.height(x + s, z + s), z: z + s });
       placed++;
     }
-    for (let t = 0; t < 200 && this.lootSpots.length < 150; t++) {
+    for (let t = 0; t < 200 && this.lootSpots.length < 190; t++) {
       const a = R() * TAU, r = Math.sqrt(R()) * 160, x = Math.cos(a) * r, z = Math.sin(a) * r, h = this.height(x, z);
       if (h < 1 || this.phys.blocked(x, h, z, 1, 2)) continue;
       this.lootSpots.push({ x, y: h, z });
@@ -631,6 +710,9 @@ export class World {
         const h = this.height(x, z);
         if (h < (o.minH ?? 1) || h > (o.maxH ?? 30)) continue;
         if (o.avoid !== 0 && this.inPOI(x, z, o.avoid ?? 0.95)) continue;
+        if (o.road && this.roadAt(x, z) < o.road) continue;
+        if (o.flat && this.steep(x, z)) continue;
+        if (Math.hypot(x - SINK.x, z - SINK.z) < SINK.r + 3) continue;
         if (o.free && this.phys.blocked(x, h, z, o.free, 3)) continue;
         fn(x, h, z);
         placed++;
@@ -663,7 +745,7 @@ export class World {
       trunks.push({ x, y: h - 0.2, z, s, ry });
       (R() < 0.5 ? pines : puffs).push({ x, y: h - 0.2, z, s, ry, c: col, k: 0.85 + R() * 0.3 });
       this.phys.addBox(x - 0.3 * s, h - 1, z - 0.3 * s, x + 0.3 * s, h + 2.6 * s, z + 0.3 * s);
-    }, { minH: 1.2, maxH: 14, free: 2.5 });
+    }, { minH: 1.2, maxH: 16, free: 2.5, road: 6, flat: 1 });
     inst(trunkG, trunkMat, trunks);
     inst(pineG, leafMat, pines);
     inst(puffG, leafMat, puffs);
@@ -675,7 +757,7 @@ export class World {
       const s = 0.6 + R() * R() * 2.6;
       rocks.push({ x, y: h + s * 0.15, z, sx: s * (0.8 + R() * 0.5), sy: s * (0.6 + R() * 0.4), sz: s * (0.8 + R() * 0.5), ry: R() * TAU, rx: R() * 0.4, c: this.pickC([0x8f7fd8, 0x7a68c4, 0xa79be6, 0x6d5fb0]) });
       if (s > 0.9) this.phys.addBox(x - s * 0.62, h - 1, z - s * 0.62, x + s * 0.62, h + s * 0.62, z + s * 0.62);
-    }, { minH: 0.4, free: 2.5, avoid: 0.9 });
+    }, { minH: 0.4, free: 2.5, avoid: 0.9, road: 6 });
     inst(new THREE.IcosahedronGeometry(1, 0), rockMat, rocks);
 
     // crystals (two emissive colours)
@@ -690,7 +772,7 @@ export class World {
       if (big) this.phys.addBox(x - 0.5, h - 1, z - 0.5, x + 0.5, h + 2.2, z + 0.5);
     };
     scatter(26, (x, h, z) => addCry(x, h, z, true), { cx: POIS[3].x, cz: POIS[3].z, rmax: 34, avoid: 0, free: 2 });
-    scatter(46, (x, h, z) => addCry(x, h, z, R() < 0.3), { minH: 1.5, free: 2 });
+    scatter(46, (x, h, z) => addCry(x, h, z, R() < 0.3), { minH: 1.5, free: 2, road: 5 });
     const cryMat = (col, em) => new THREE.MeshStandardMaterial({ color: col, emissive: em, emissiveIntensity: 1.5, roughness: 0.2, flatShading: true });
     inst(cryG, cryMat(0x8ff8ff, 0x23d8ff), cA, false);
     inst(cryG, cryMat(0xffa0ec, 0xff3fd0), cB, false);
@@ -698,8 +780,8 @@ export class World {
     // grass tufts + glow flowers
     const tufts = [], flowers = [];
     const gcol = [0x2fc49a, 0x58dba0, 0x1fa89c, 0x9fe88a];
-    scatter(7000, (x, h, z) => tufts.push({ x, y: h + 0.12, z, sx: 0.7 + R() * 0.8, sy: 0.5 + R() * 0.9, sz: 0.7 + R() * 0.8, ry: R() * TAU, c: this.pickC(gcol) }), { minH: 1.5, maxH: 10, avoid: 0.8 });
-    scatter(700, (x, h, z) => flowers.push({ x, y: h + 0.3 + R() * 0.2, z, s: 0.07 + R() * 0.06, c: this.pickC([0xff5fe0, 0xffe14a, 0x6ef3ff, 0xffffff]), k: 2.2 }), { minH: 1, maxH: 10, avoid: 0.8 });
+    scatter(7000, (x, h, z) => tufts.push({ x, y: h + 0.12, z, sx: 0.7 + R() * 0.8, sy: 0.5 + R() * 0.9, sz: 0.7 + R() * 0.8, ry: R() * TAU, c: this.pickC(gcol) }), { minH: 1.5, maxH: 10, avoid: 0.8, road: 4.6 });
+    scatter(700, (x, h, z) => flowers.push({ x, y: h + 0.3 + R() * 0.2, z, s: 0.07 + R() * 0.06, c: this.pickC([0xff5fe0, 0xffe14a, 0x6ef3ff, 0xffffff]), k: 2.2 }), { minH: 1, maxH: 10, avoid: 0.8, road: 4.6 });
     inst(new THREE.ConeGeometry(0.14, 0.5, 3, 1, true), new THREE.MeshStandardMaterial({ roughness: 1, flatShading: true, side: THREE.DoubleSide }), tufts, false).receiveShadow = true;
     inst(new THREE.OctahedronGeometry(1, 0), new THREE.MeshBasicMaterial({ toneMapped: false }), flowers, false);
 
@@ -788,6 +870,7 @@ export class World {
         else { const k = 0.8 + h * 0.03; r = 50 * k; gg = 200 * k; b = 160 * k; }
         const poi = this.inPOI(x, z, 0.75);
         if (poi && poi.paved && h > 0.3) { r = 120; gg = 118; b = 190; }
+        else if (h > 0.3 && this.roadAt(x, z) < 3.6) { r = 84; gg = 80; b = 150; }
         const i = (py * S + px) * 4;
         img.data[i] = r; img.data[i + 1] = gg; img.data[i + 2] = b; img.data[i + 3] = a;
       }
@@ -842,6 +925,7 @@ export class World {
     }
     for (const p of this.jumpPads) p.ring.scale.setScalar(1 + 0.12 * Math.sin(t * 5 + p.x));
     this.clouds.rotation.y += dt * 0.004;
+    updateAtmosphere(this, dt, cam, t);
     for (const i of this.islets) i.m.position.y = i.y + Math.sin(t * 0.3 + i.ph) * 4;
     // shadow frustum follows the camera, snapped to reduce shimmer
     const sx = Math.round(cam.position.x / 4) * 4, sz = Math.round(cam.position.z / 4) * 4;

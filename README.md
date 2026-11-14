@@ -1,9 +1,13 @@
 # PRISMFALL — Arena Royale
 
+**Play it now: https://jahyoocormack-bot.github.io/prismfall/**
+
 A complete, original 3D browser shooter. No build step, no downloads for the player, no external assets.
 
 - **Royale** — glide onto a neon island, loot weapons by rarity, outlast 19 AI rivals while the storm closes.
 - **Deathmatch** — 8-player respawn brawl in Neon Plaza, first to 20 eliminations (6-minute cap).
+- One hand-laid island with 15 named areas joined by a road network: Neon Plaza, Dockyard, the Reactor, Crystal Ridge, Sunset Villa, four watch posts, plus the Scrapyard, the Ruins, a Broken Highway overpass, the Bunker Line, a Relay Station and a road Checkpoint. Terraced cliffs, road cuts and a toxic crater lake break up the ground between them.
+- A megacity skyline, sweeping searchlights, holo-billboards, patrol drones and burning wrecks set the mood.
 - 6 weapons (pistol, rifle, SMG, shotgun, scoped sniper, rocket launcher) + frag grenades, 4 rarities.
 - Sprint, slide, blink-dash, jump pads, aim-down-sights, headshots, shields, damage numbers, kill feed, minimap, compass, scoreboard.
 - Progression: XP levels, coins, daily bonus, a Locker with 8 weapon wraps and 5 tracer colours, saved in the browser.
@@ -104,7 +108,8 @@ Almost every number lives in `src/config.js`: weapon stats, rarities, storm phas
 | File | Responsibility |
 | --- | --- |
 | `main.js` | boot, render pipeline, quality presets, match flow |
-| `world.js` | terrain, buildings, scenery, sky, water, storm wall, minimap |
+| `world.js` | terrain, roads, original districts, scenery, sky, water, storm wall, minimap |
+| `worldplus.js` | newer districts, vehicles and props, skyline, searchlights, billboards, drones, fires |
 | `physics.js` | character collision, raycasts |
 | `player.js` | first-person controller and weapon view model |
 | `bots.js` | AI: perception, movement, aim, fire discipline |

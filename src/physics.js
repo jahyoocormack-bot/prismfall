@@ -90,7 +90,9 @@ export class Physics {
     c.landed = 0;
     const dist = Math.hypot(v.x, v.z) * dt;
     const n = Math.max(1, Math.ceil(dist / 0.3));
-    const sdt = dt / n;
+    // scrambling up a cliff face is slow (terrain never blocks, so bots cannot get trapped by it)
+    const climb = dist > 1e-4 && c.onGround && (this.h(p.x + v.x * dt, p.z + v.z * dt) - this.h(p.x, p.z)) / dist > 1.15 ? 0.42 : 1;
+    const sdt = (dt / n) * climb;
     for (let s = 0; s < n; s++) {
       p.x += v.x * sdt;
       p.z += v.z * sdt;
